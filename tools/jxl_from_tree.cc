@@ -8,10 +8,12 @@
 
 #include <fstream>
 #include <iostream>
+#include <istream>
 #include <unordered_map>
 
 #include "lib/jxl/base/file_io.h"
 #include "lib/jxl/enc_cache.h"
+#include "lib/jxl/enc_color_management.h"
 #include "lib/jxl/enc_file.h"
 #include "lib/jxl/enc_frame.h"
 #include "lib/jxl/enc_heuristics.h"
@@ -347,6 +349,9 @@ bool ParseNode(F& tok, Tree& tree, SplineData& spline_data,
     spline_data.splines.push_back(std::move(spline));
   } else if (t == "Gaborish") {
     cparams.gaborish = jxl::Override::kOn;
+  } else if (t == "DeltaPalette") {
+    cparams.lossy_palette = true;
+    cparams.palette_colors = 0;
   } else if (t == "EPF") {
     t = tok();
     size_t num = 0;
@@ -354,6 +359,28 @@ bool ParseNode(F& tok, Tree& tree, SplineData& spline_data,
     if (num != t.size() || cparams.epf > 3) {
       fprintf(stderr, "Invalid EPF: %s\n", t.c_str());
       return false;
+    }
+  } else if (t == "Noise") {
+    cparams.manual_noise.resize(8);
+    for (size_t i = 0; i < 8; i++) {
+      t = tok();
+      size_t num = 0;
+      cparams.manual_noise[i] = std::stof(t, &num);
+      if (num != t.size()) {
+        fprintf(stderr, "Invalid noise entry: %s\n", t.c_str());
+        return false;
+      }
+    }
+  } else if (t == "XYBFactors") {
+    cparams.manual_xyb_factors.resize(3);
+    for (size_t i = 0; i < 3; i++) {
+      t = tok();
+      size_t num = 0;
+      cparams.manual_xyb_factors[i] = std::stof(t, &num);
+      if (num != t.size()) {
+        fprintf(stderr, "Invalid XYB factor: %s\n", t.c_str());
+        return false;
+      }
     }
   } else {
     fprintf(stderr, "Unexpected node type: %s\n", t.c_str());
@@ -385,15 +412,24 @@ int JxlFromTree(const char* in, const char* out, const char* tree_out) {
   CompressParams cparams = {};
   size_t width = 1024, height = 1024;
   int x0 = 0, y0 = 0;
-  cparams.color_transform = ColorTransform::kNone;
+  cparams.SetLossless();
+  cparams.resampling = 1;
+  cparams.ec_resampling = 1;
   cparams.modular_group_size_shift = 3;
   CodecInOut io;
   int have_next = 0;
 
-  std::ifstream f(in);
+  std::istream* f = &std::cin;
+  std::ifstream file;
+
+  if (strcmp(in, "-")) {
+    file.open(in, std::ifstream::in);
+    f = &file;
+  }
+
   auto tok = [&f]() {
     std::string out;
-    f >> out;
+    *f >> out;
     return out;
   };
   if (!ParseNode(tok, tree, spline_data, cparams, width, height, io, have_next,
@@ -410,7 +446,6 @@ int JxlFromTree(const char* in, const char* out, const char* tree_out) {
              (height + y0) * cparams.resampling);
   io.metadata.m.color_encoding.DecideIfWantICC();
   cparams.options.zero_tokens = true;
-  cparams.modular_mode = true;
   cparams.palette_colors = 0;
   cparams.channel_colors_pre_transform_percent = 0;
   cparams.channel_colors_percent = 0;
@@ -432,7 +467,7 @@ int JxlFromTree(const char* in, const char* out, const char* tree_out) {
 
   while (true) {
     PassesEncoderState enc_state;
-    enc_state.heuristics = make_unique<Heuristics>(tree);
+    enc_state.heuristics = jxl::make_unique<Heuristics>(tree);
     enc_state.shared.image_features.splines =
         SplinesFromSplineData(spline_data, enc_state.shared.cmap);
 
@@ -442,13 +477,16 @@ int JxlFromTree(const char* in, const char* out, const char* tree_out) {
 
     io.frames[0].origin.x0 = x0;
     io.frames[0].origin.y0 = y0;
+    info.clamp = false;
 
     JXL_RETURN_IF_ERROR(EncodeFrame(cparams, info, metadata.get(), io.frames[0],
-                                    &enc_state, nullptr, &writer, nullptr));
+                                    &enc_state, GetJxlCms(), nullptr, &writer,
+                                    nullptr));
     if (!have_next) break;
     tree.clear();
     spline_data.splines.clear();
     have_next = 0;
+    cparams.manual_noise.clear();
     if (!ParseNode(tok, tree, spline_data, cparams, width, height, io,
                    have_next, x0, y0)) {
       return 1;
@@ -460,7 +498,9 @@ int JxlFromTree(const char* in, const char* out, const char* tree_out) {
 
   compressed = std::move(writer).TakeBytes();
 
-  if (!WriteFile(compressed, out)) {
+  if (!strcmp(out, "-")) {
+    fwrite(compressed.data(), 1, compressed.size(), stdout);
+  } else if (!WriteFile(compressed, out)) {
     fprintf(stderr, "Failed to write to \"%s\"\n", out);
     return 1;
   }
@@ -470,7 +510,8 @@ int JxlFromTree(const char* in, const char* out, const char* tree_out) {
 }  // namespace jxl
 
 int main(int argc, char** argv) {
-  if ((argc != 3 && argc != 4) || !strcmp(argv[1], argv[2])) {
+  if ((argc != 3 && argc != 4) ||
+      (strcmp(argv[1], "-") && !strcmp(argv[1], argv[2]))) {
     fprintf(stderr, "Usage: %s tree_in.txt out.jxl [tree_drawing]\n", argv[0]);
     return 1;
   }

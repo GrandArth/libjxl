@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-#include "lib/extras/color_hints.h"
+#include "lib/extras/dec/color_hints.h"
 #include "lib/jxl/base/override.h"
 #include "lib/jxl/base/status.h"
 #include "lib/jxl/butteraugli/butteraugli.h"
@@ -118,7 +118,7 @@ struct BenchmarkArgs {
   float intensity_target;
 
   std::string color_hints_string;
-  jxl::ColorHints color_hints;
+  jxl::extras::ColorHints color_hints;
 
   size_t override_bitdepth;
 
@@ -126,8 +126,11 @@ struct BenchmarkArgs {
   double heatmap_good;
   double heatmap_bad;
 
+  bool save_heatmap;
   bool write_html_report;
   bool html_report_self_contained;
+  bool html_report_use_decompressed;
+  bool html_report_add_heatmap;
   bool markdown;
   bool more_columns;
 

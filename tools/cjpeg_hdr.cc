@@ -14,19 +14,19 @@
 #include <hwy/highway.h>
 
 #include "lib/extras/codec.h"
-#include "lib/extras/codec_jpg.h"
 #include "lib/jxl/base/file_io.h"
 #include "lib/jxl/base/padded_bytes.h"
 #include "lib/jxl/codec_in_out.h"
 #include "lib/jxl/common.h"
 #include "lib/jxl/enc_adaptive_quantization.h"
+#include "lib/jxl/enc_color_management.h"
 #include "lib/jxl/enc_transforms.h"
 #include "lib/jxl/enc_xyb.h"
 #include "lib/jxl/image.h"
 #include "lib/jxl/image_bundle.h"
 #include "lib/jxl/image_metadata.h"
 #include "lib/jxl/image_ops.h"
-#include "lib/jxl/jpeg/jpeg_data.h"
+#include "lib/jxl/jpeg/dec_jpeg_data_writer.h"
 #include "lib/jxl/quant_weights.h"
 
 HWY_BEFORE_NAMESPACE();
@@ -164,13 +164,13 @@ void FillJPEGData(const jxl::Image3F& ycbcr, const jxl::PaddedBytes& icc,
   out->marker_order.emplace_back(0xC4);
   out->huffman_code.resize(2);
   out->huffman_code[0].slot_id = 0x00;  // DC
-  out->huffman_code[0].counts = {0, 0, 0, 0, 13};
+  out->huffman_code[0].counts = {{0, 0, 0, 0, 13}};
   std::iota(out->huffman_code[0].values.begin(),
             out->huffman_code[0].values.end(), 0);
   out->huffman_code[0].is_last = false;
 
   out->huffman_code[1].slot_id = 0x10;  // AC
-  out->huffman_code[1].counts = {0, 0, 0, 0, 0, 0, 0, 0, 255};
+  out->huffman_code[1].counts = {{0, 0, 0, 0, 0, 0, 0, 0, 255}};
   std::iota(out->huffman_code[1].values.begin(),
             out->huffman_code[1].values.end(), 0);
   out->huffman_code[1].is_last = true;
@@ -183,15 +183,15 @@ void FillJPEGData(const jxl::Image3F& ycbcr, const jxl::PaddedBytes& icc,
   // DC
   // comp id, DC tbl, AC tbl
   out->scan_info[0].num_components = 3;
-  out->scan_info[0].components = {jxl::jpeg::JPEGComponentScanInfo{0, 0, 0},
-                                  jxl::jpeg::JPEGComponentScanInfo{1, 0, 0},
-                                  jxl::jpeg::JPEGComponentScanInfo{2, 0, 0}};
+  out->scan_info[0].components = {{jxl::jpeg::JPEGComponentScanInfo{0, 0, 0},
+                                   jxl::jpeg::JPEGComponentScanInfo{1, 0, 0},
+                                   jxl::jpeg::JPEGComponentScanInfo{2, 0, 0}}};
   out->scan_info[0].Ss = 0;
   out->scan_info[0].Se = 0;
   out->scan_info[0].Ah = out->scan_info[0].Al = 0;
   // AC 1 - highest bits
   out->scan_info[1].num_components = 1;
-  out->scan_info[1].components = {jxl::jpeg::JPEGComponentScanInfo{0, 0, 0}};
+  out->scan_info[1].components = {{jxl::jpeg::JPEGComponentScanInfo{0, 0, 0}}};
   out->scan_info[1].Ss = 1;
   out->scan_info[1].Se = 63;
   out->scan_info[1].Ah = 0;
@@ -205,7 +205,7 @@ void FillJPEGData(const jxl::Image3F& ycbcr, const jxl::PaddedBytes& icc,
 
   // AC 2 - lowest bit
   out->scan_info[4].num_components = 1;
-  out->scan_info[4].components = {jxl::jpeg::JPEGComponentScanInfo{0, 0, 0}};
+  out->scan_info[4].components = {{jxl::jpeg::JPEGComponentScanInfo{0, 0, 0}}};
   out->scan_info[4].Ss = 1;
   out->scan_info[4].Se = 63;
   out->scan_info[4].Ah = 1;
@@ -239,7 +239,7 @@ int HBDJPEGMain(int argc, const char* argv[]) {
   }
   fprintf(stderr, "Compressing %s to %s\n", argv[1], argv[2]);
   jxl::CodecInOut io;
-  if (!jxl::SetFromFile(argv[1], jxl::ColorHints{}, &io)) {
+  if (!jxl::SetFromFile(argv[1], jxl::extras::ColorHints{}, &io)) {
     fprintf(stderr, "Failed to read image %s.\n", argv[1]);
     return 1;
   }
@@ -275,7 +275,7 @@ int HBDJPEGMain(int argc, const char* argv[]) {
   jxl::Image3F opsin(jxl::RoundUpToBlockDim(io.xsize()),
                      jxl::RoundUpToBlockDim(io.ysize()));
   opsin.ShrinkTo(io.xsize(), io.ysize());
-  jxl::ToXYB(io.Main(), nullptr, &opsin);
+  jxl::ToXYB(io.Main(), nullptr, &opsin, jxl::GetJxlCms());
   PadImageToBlockMultipleInPlace(&opsin);
   jxl::ImageF mask;
   jxl::ImageF qf =
@@ -287,7 +287,7 @@ int HBDJPEGMain(int argc, const char* argv[]) {
   (ycbcr, io.metadata.m.color_encoding.ICC(), qf, frame_dim,
    out.Main().jpeg_data.get());
   jxl::PaddedBytes output;
-  if (!jxl::extras::EncodeImageJPGCoefficients(&out, &output)) {
+  if (!jxl::jpeg::EncodeImageJPGCoefficients(&out, &output)) {
     return 1;
   }
   if (!jxl::WriteFile(output, argv[2])) {

@@ -10,8 +10,7 @@
 #include <vector>
 
 #include "lib/extras/codec.h"
-#include "lib/extras/codec_png.h"
-#include "lib/extras/color_hints.h"
+#include "lib/extras/dec/color_hints.h"
 #include "lib/jxl/base/data_parallel.h"
 #include "lib/jxl/base/file_io.h"
 #include "lib/jxl/base/padded_bytes.h"
@@ -24,6 +23,7 @@
 #include "lib/jxl/color_management.h"
 #include "lib/jxl/enc_butteraugli_comparator.h"
 #include "lib/jxl/enc_butteraugli_pnorm.h"
+#include "lib/jxl/enc_color_management.h"
 #include "lib/jxl/image.h"
 #include "lib/jxl/image_bundle.h"
 #include "lib/jxl/image_ops.h"
@@ -31,23 +31,20 @@
 namespace jxl {
 namespace {
 
-Status WritePNG(Image3F&& image, const std::string& filename) {
+Status WriteImage(Image3F&& image, const std::string& filename) {
   ThreadPoolInternal pool(4);
   CodecInOut io;
   io.metadata.m.SetUintSamples(8);
   io.metadata.m.color_encoding = ColorEncoding::SRGB();
   io.SetFromImage(std::move(image), io.metadata.m.color_encoding);
-  PaddedBytes compressed;
-  JXL_CHECK(extras::EncodeImagePNG(&io, io.Main().c_current(), 8, &pool,
-                                   &compressed));
-  return WriteFile(compressed, filename);
+  return EncodeToFile(io, filename, &pool);
 }
 
 Status RunButteraugli(const char* pathname1, const char* pathname2,
                       const std::string& distmap_filename,
                       const std::string& colorspace_hint, double p,
                       float intensity_target) {
-  ColorHints color_hints;
+  extras::ColorHints color_hints;
   if (!colorspace_hint.empty()) {
     color_hints.Add("color_space", colorspace_hint);
   }
@@ -78,11 +75,11 @@ Status RunButteraugli(const char* pathname1, const char* pathname2,
 
   ImageF distmap;
   ButteraugliParams ba_params;
-  ba_params.hf_asymmetry = 0.8f;
+  ba_params.hf_asymmetry = 1.0f;
   ba_params.xmul = 1.0f;
   ba_params.intensity_target = intensity_target;
-  const float distance =
-      ButteraugliDistance(io1.Main(), io2.Main(), ba_params, &distmap, &pool);
+  const float distance = ButteraugliDistance(io1.Main(), io2.Main(), ba_params,
+                                             GetJxlCms(), &distmap, &pool);
   printf("%.10f\n", distance);
 
   double pnorm = ComputeDistanceP(distmap, ba_params, p);
@@ -92,7 +89,7 @@ Status RunButteraugli(const char* pathname1, const char* pathname2,
     float good = ButteraugliFuzzyInverse(1.5);
     float bad = ButteraugliFuzzyInverse(0.5);
     JXL_CHECK(
-        WritePNG(CreateHeatMapImage(distmap, good, bad), distmap_filename));
+        WriteImage(CreateHeatMapImage(distmap, good, bad), distmap_filename));
   }
   return true;
 }
@@ -103,9 +100,11 @@ Status RunButteraugli(const char* pathname1, const char* pathname2,
 int main(int argc, char** argv) {
   if (argc < 3) {
     fprintf(stderr,
-            "Usage: %s <reference> <distorted> [--distmap <distmap>] "
-            "[--intensity_target <intensity_target>]\n"
-            "[--colorspace <colorspace_hint>]\n"
+            "Usage: %s <reference> <distorted>\n"
+            "  [--distmap <distmap>]\n"
+            "  [--intensity_target <intensity_target>]\n"
+            "  [--colorspace <colorspace_hint>]\n"
+            "  [--pnorm <pth norm>]\n"
             "NOTE: images get converted to linear sRGB for butteraugli. Images"
             " without attached profiles (such as ppm or pfm) are interpreted"
             " as nonlinear sRGB. The hint format is RGB_D65_SRG_Rel_Lin for"
@@ -124,7 +123,7 @@ int main(int argc, char** argv) {
     } else if (std::string(argv[i]) == "--colorspace" && i + 1 < argc) {
       colorspace = argv[++i];
     } else if (std::string(argv[i]) == "--intensity_target" && i + 1 < argc) {
-      intensity_target = std::stof(std::string(argv[i + 1]));
+      intensity_target = std::stof(std::string(argv[++i]));
     } else if (std::string(argv[i]) == "--pnorm" && i + 1 < argc) {
       char* end;
       p = strtod(argv[++i], &end);

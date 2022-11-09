@@ -9,6 +9,7 @@
 #include "lib/extras/codec.h"
 #include "lib/extras/tone_mapping.h"
 #include "lib/jxl/base/thread_pool_internal.h"
+#include "lib/jxl/enc_color_management.h"
 #include "tools/args.h"
 #include "tools/cmdline.h"
 
@@ -66,7 +67,7 @@ int main(int argc, const char** argv) {
   }
 
   jxl::CodecInOut image;
-  jxl::ColorHints color_hints;
+  jxl::extras::ColorHints color_hints;
   color_hints.Add("color_space", "RGB_D65_202_Rel_PeQ");
   JXL_CHECK(jxl::SetFromFile(input_filename, color_hints, &image, &pool));
   if (max_nits > 0) {
@@ -79,10 +80,10 @@ int main(int argc, const char** argv) {
   if (pq) {
     c_out.tf.SetTransferFunction(jxl::TransferFunction::kPQ);
   } else {
-    c_out.tf.SetTransferFunction(jxl::TransferFunction::k709);
+    c_out.tf.SetTransferFunction(jxl::TransferFunction::kSRGB);
   }
   JXL_CHECK(c_out.CreateICC());
-  JXL_CHECK(image.TransformTo(c_out, &pool));
+  JXL_CHECK(image.TransformTo(c_out, jxl::GetJxlCms(), &pool));
   image.metadata.m.color_encoding = c_out;
   JXL_CHECK(jxl::EncodeToFile(image, output_filename, &pool));
 }

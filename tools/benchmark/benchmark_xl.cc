@@ -19,8 +19,7 @@
 
 #include "jxl/decode.h"
 #include "lib/extras/codec.h"
-#include "lib/extras/codec_png.h"
-#include "lib/extras/color_hints.h"
+#include "lib/extras/dec/color_hints.h"
 #include "lib/extras/time.h"
 #include "lib/jxl/alpha.h"
 #include "lib/jxl/base/cache_aligned.h"
@@ -36,12 +35,13 @@
 #include "lib/jxl/base/thread_pool_internal.h"
 #include "lib/jxl/codec_in_out.h"
 #include "lib/jxl/color_encoding_internal.h"
-#include "lib/jxl/color_management.h"
 #include "lib/jxl/enc_butteraugli_comparator.h"
 #include "lib/jxl/enc_butteraugli_pnorm.h"
+#include "lib/jxl/enc_color_management.h"
 #include "lib/jxl/image.h"
 #include "lib/jxl/image_bundle.h"
 #include "lib/jxl/image_ops.h"
+#include "lib/jxl/jpeg/enc_jpeg_data.h"
 #include "tools/benchmark/benchmark_args.h"
 #include "tools/benchmark/benchmark_codec.h"
 #include "tools/benchmark/benchmark_file_io.h"
@@ -53,29 +53,40 @@
 namespace jxl {
 namespace {
 
-Status WritePNG(Image3F&& image, ThreadPool* pool,
-                const std::string& filename) {
+Status WriteImage(Image3F&& image, ThreadPool* pool,
+                  const std::string& filename) {
   CodecInOut io;
   io.metadata.m.SetUintSamples(8);
   io.metadata.m.color_encoding = ColorEncoding::SRGB();
   io.SetFromImage(std::move(image), io.metadata.m.color_encoding);
-  PaddedBytes compressed;
-  JXL_CHECK(
-      extras::EncodeImagePNG(&io, io.Main().c_current(), 8, pool, &compressed));
-  return WriteFile(compressed, filename);
+  return EncodeToFile(io, filename, pool);
 }
 
 Status ReadPNG(const std::string& filename, Image3F* image) {
   CodecInOut io;
-  JXL_CHECK(SetFromFile(filename, ColorHints(), &io));
+  JXL_CHECK(SetFromFile(filename, extras::ColorHints(), &io));
   *image = CopyImage(*io.Main().color());
   return true;
+}
+
+std::string CodecToExtension(std::string codec_name, char sep) {
+  std::string result;
+  // Add in the parameters of the codec_name in reverse order, so that the
+  // name of the file format (e.g. jxl) is last.
+  int pos = static_cast<int>(codec_name.size()) - 1;
+  while (pos > 0) {
+    int prev = codec_name.find_last_of(sep, pos);
+    if (prev > pos) prev = -1;
+    result += '.' + codec_name.substr(prev + 1, pos - prev);
+    pos = prev - 1;
+  }
+  return result;
 }
 
 void DoCompress(const std::string& filename, const CodecInOut& io,
                 const std::vector<std::string>& extra_metrics_commands,
                 ImageCodec* codec, ThreadPoolInternal* inner_pool,
-                PaddedBytes* compressed, BenchmarkStats* s) {
+                std::vector<uint8_t>* compressed, BenchmarkStats* s) {
   PROFILER_FUNC;
   ++s->total_input_files;
 
@@ -134,10 +145,9 @@ void DoCompress(const std::string& filename, const CodecInOut& io,
   }
 
   if (valid && Args()->decode_only) {
-    std::string data_in;
+    std::vector<uint8_t> data_in;
     JXL_CHECK(ReadFile(filename, &data_in));
-    compressed->append((uint8_t*)data_in.data(),
-                       (uint8_t*)data_in.data() + data_in.size());
+    compressed->insert(compressed->end(), data_in.begin(), data_in.end());
   }
 
   // Decompress
@@ -214,9 +224,10 @@ void DoCompress(const std::string& filename, const CodecInOut& io,
         if (fabs(params.intensity_target - 255.0f) < 1e-3) {
           params.intensity_target = 80.0;
         }
-        distance = ButteraugliDistance(ib1, ib2, params, &distmap, inner_pool);
+        distance = ButteraugliDistance(ib1, ib2, params, GetJxlCms(), &distmap,
+                                       inner_pool);
         // Ensure pixels in range 0-1
-        s->distance_2 += ComputeDistance2(ib1, ib2);
+        s->distance_2 += ComputeDistance2(ib1, ib2, GetJxlCms());
       } else {
         // TODO(veluca): re-upsample and compute proper distance.
         distance = 1e+4f;
@@ -268,11 +279,14 @@ void DoCompress(const std::string& filename, const CodecInOut& io,
     std::string dir = FileDirName(filename);
     std::string outdir =
         Args()->output_dir.empty() ? dir + "/out" : Args()->output_dir;
-    // Make compatible for filename
-    std::replace(codec_name.begin(), codec_name.end(), ':', '_');
-    std::string compressed_fn = outdir + "/" + name + "." + codec_name;
+    std::string compressed_fn =
+        outdir + "/" + name + CodecToExtension(codec_name, ':');
     std::string decompressed_fn = compressed_fn + Args()->output_extension;
+#if JPEGXL_ENABLE_APNG
     std::string heatmap_fn = compressed_fn + ".heatmap.png";
+#else
+    std::string heatmap_fn = compressed_fn + ".heatmap.ppm";
+#endif
     JXL_CHECK(MakeDir(outdir));
     if (Args()->save_compressed) {
       std::string compressed_str(
@@ -285,7 +299,7 @@ void DoCompress(const std::string& filename, const CodecInOut& io,
       if (Args()->mul_output != 0.0) {
         fprintf(stderr, "WARNING: scaling outputs by %f\n", Args()->mul_output);
         JXL_CHECK(ib2.TransformTo(ColorEncoding::LinearSRGB(ib2.IsGray()),
-                                  inner_pool));
+                                  GetJxlCms(), inner_pool));
         ScaleImage(static_cast<float>(Args()->mul_output), ib2.color());
       }
 
@@ -297,8 +311,10 @@ void DoCompress(const std::string& filename, const CodecInOut& io,
                                                  : ButteraugliFuzzyInverse(1.5);
         float bad = Args()->heatmap_bad > 0.0f ? Args()->heatmap_bad
                                                : ButteraugliFuzzyInverse(0.5);
-        JXL_CHECK(WritePNG(CreateHeatMapImage(distmap, good, bad), inner_pool,
-                           heatmap_fn));
+        if (Args()->save_heatmap) {
+          JXL_CHECK(WriteImage(CreateHeatMapImage(distmap, good, bad),
+                               inner_pool, heatmap_fn));
+        }
       }
     }
   }
@@ -398,12 +414,13 @@ void WriteHtmlReport(const std::string& codec_desc,
                      const std::vector<std::string>& fnames,
                      const std::vector<const Task*>& tasks,
                      const std::vector<const CodecInOut*>& images,
-                     bool self_contained) {
+                     bool add_heatmap, bool self_contained) {
   std::string toggle_js =
       "<script type=\"text/javascript\">\n"
       "  var codecname = '" +
       codec_desc + "';\n";
-  toggle_js += R"(
+  if (add_heatmap) {
+    toggle_js += R"(
   var maintitle = codecname + ' - click images to toggle, press space to' +
       ' toggle all, h to toggle all heatmaps. Zoom in with CTRL+wheel or' +
       ' CTRL+plus.';
@@ -427,7 +444,7 @@ void WriteHtmlReport(const std::string& codec_desc,
       hm.style.display = 'block';
     }
   }
-  function toggle3(i) {
+  function toggle(i) {
     for (index = counter.length; index <= i; index++) {
       counter.push(1);
     }
@@ -452,9 +469,50 @@ void WriteHtmlReport(const std::string& codec_desc,
   };
 </script>
 )";
+  } else {
+    toggle_js += R"(
+  var maintitle = codecname + ' - click images to toggle, press space to' +
+      ' toggle all. Zoom in with CTRL+wheel or CTRL+plus.';
+  document.title = maintitle;
+  var counter = [];
+  function setState(i, s) {
+    var preview = document.getElementById("preview" + i);
+    var orig = document.getElementById("orig" + i);
+    if (s == 0) {
+      preview.style.display = 'none';
+      orig.style.display = 'block';
+    } else if (s == 1) {
+      preview.style.display = 'block';
+      orig.style.display = 'none';
+    }
+  }
+  function toggle(i) {
+    for (index = counter.length; index <= i; index++) {
+      counter.push(1);
+    }
+    setState(i, counter[i]);
+    counter[i] = 1 - counter[i];
+    document.title = maintitle;
+  }
+  var toggleall_state = 1;
+  document.body.onkeydown = function(e) {
+    // space (32) to toggle orig/compr
+    if (e.keyCode == 32) {
+      var divs = document.getElementsByTagName('div');
+      toggleall_state = 1 - toggleall_state;
+      document.title = codecname + ' - ' + (toggleall_state == 0 ?
+          'originals' : 'compressed');
+      for (var i = 0; i < divs.length; i++) {
+        setState(i, toggleall_state);
+      }
+      return false;
+    }
+  };
+</script>
+)";
+  }
   std::string out_html;
   std::string outdir;
-  std::string toggleall = "function(e) {if(e.keyCode == 32 { ";
   out_html += "<body bgcolor=\"#000\">\n";
   out_html += "<style>img { image-rendering: pixelated; }</style>\n";
   std::string codec_name = codec_desc;
@@ -464,8 +522,12 @@ void WriteHtmlReport(const std::string& codec_desc,
     std::string name = FileBaseName(fnames[i]);
     std::string dir = FileDirName(fnames[i]);
     outdir = Args()->output_dir.empty() ? dir + "/out" : Args()->output_dir;
-    std::string name_out = name + "." + codec_name + Args()->output_extension;
-    std::string heatmap_out = name + "." + codec_name + ".heatmap.png";
+    std::string name_out = name + CodecToExtension(codec_name, '_');
+    if (Args()->html_report_use_decompressed) {
+      name_out += Args()->output_extension;
+    }
+    std::string heatmap_out =
+        name + CodecToExtension(codec_name, '_') + ".heatmap.png";
 
     std::string fname_orig = fnames[i];
     std::string fname_out = outdir + "/" + name_out;
@@ -493,24 +555,20 @@ void WriteHtmlReport(const std::string& codec_desc,
     double max_dist = tasks[i]->stats.max_distance;
     std::string compressed_title = StringPrintf(
         "compressed. bpp: %f, pnorm: %f, max dist: %f", bpp, pnorm, max_dist);
-    out_html += "<div onclick=\"toggle3(" + number +
+    out_html += "<div onclick=\"toggle(" + number +
                 ");\" style=\"display:inline-block;width:" + html_width +
                 ";height:" + html_height +
                 ";\">\n"
                 "  <img title=\"" +
                 compressed_title + "\" id=\"preview" + number + "\" src=";
-    out_html += "\"" + url_out + "\"";
-    out_html +=
-        " style=\"display:block;\"/>\n"
-        "  <img title=\"original\" id=\"orig" +
-        number + "\" src=";
-    out_html += "\"" + url_orig + "\"";
-    out_html +=
-        " style=\"display:none;\"/>\n"
-        "  <img title=\"heatmap\" id=\"hm" +
-        number + "\" src=";
-    out_html += "\"" + url_heatmap + "\"";
-    out_html += " style=\"display:none;\"/>\n</div>\n";
+    out_html += "\"" + url_out + "\"style=\"display:block;\"/>\n";
+    out_html += "  <img title=\"original\" id=\"orig" + number + "\" src=";
+    out_html += "\"" + url_orig + "\"style=\"display:none;\"/>\n";
+    if (add_heatmap) {
+      out_html = "  <img title=\"heatmap\" id=\"hm" + number + "\" src=";
+      out_html += "\"" + url_heatmap + "\"style=\"display:none;\"/>\n";
+    }
+    out_html += "</div>\n";
   }
   out_html += "</body>\n";
   out_html += toggle_js;
@@ -673,6 +731,7 @@ struct StatPrinter {
 
     if (Args()->write_html_report) {
       WriteHtmlReport(method, *fnames_, tasks, images,
+                      Args()->save_heatmap && Args()->html_report_add_heatmap,
                       Args()->html_report_self_contained);
     }
 
@@ -906,7 +965,7 @@ class Benchmark {
           StringPrintf("%s/%s.crop_%dx%d+%d+%d.png", sample_tmp_dir.c_str(),
                        FileBaseName(fnames[idx]).c_str(), size, size, x0, y0);
       ThreadPool* null_pool = nullptr;
-      JXL_CHECK(WritePNG(std::move(sample), null_pool, fn_output));
+      JXL_CHECK(WriteImage(std::move(sample), null_pool, fn_output));
       fnames_out.push_back(fn_output);
     }
     fprintf(stderr, "Created %d sample tiles\n", num_samples);
@@ -937,18 +996,24 @@ class Benchmark {
     PROFILER_FUNC;
     std::vector<CodecInOut> loaded_images;
     loaded_images.resize(fnames.size());
-    RunOnPool(
-        pool, 0, static_cast<int>(fnames.size()), ThreadPool::SkipInit(),
-        [&](const int task, int /*thread*/) {
+    JXL_CHECK(RunOnPool(
+        pool, 0, static_cast<uint32_t>(fnames.size()), ThreadPool::NoInit,
+        [&](const uint32_t task, size_t /*thread*/) {
           const size_t i = static_cast<size_t>(task);
           Status ok = true;
 
-          loaded_images[i].target_nits = Args()->intensity_target;
-          loaded_images[i].dec_target = jpeg_transcoding_requested
-                                            ? DecodeTarget::kQuantizedCoeffs
-                                            : DecodeTarget::kPixels;
           if (!Args()->decode_only) {
-            ok = SetFromFile(fnames[i], Args()->color_hints, &loaded_images[i]);
+            PaddedBytes encoded;
+            ok = ReadFile(fnames[i], &encoded) &&
+                 (jpeg_transcoding_requested
+                      ? jpeg::DecodeImageJPG(Span<const uint8_t>(encoded),
+                                             &loaded_images[i])
+                      : SetFromBytes(Span<const uint8_t>(encoded),
+                                     Args()->color_hints, &loaded_images[i]));
+            if (ok && Args()->intensity_target != 0) {
+              loaded_images[i].metadata.m.SetIntensityTarget(
+                  Args()->intensity_target);
+            }
           }
           if (!ok) {
             if (!Args()->silent_errors) {
@@ -960,7 +1025,8 @@ class Benchmark {
           if (!Args()->decode_only && all_color_aware) {
             const bool is_gray = loaded_images[i].Main().IsGray();
             const ColorEncoding& c_desired = ColorEncoding::LinearSRGB(is_gray);
-            if (!loaded_images[i].TransformTo(c_desired, /*pool=*/nullptr)) {
+            if (!loaded_images[i].TransformTo(c_desired, GetJxlCms(),
+                                              /*pool=*/nullptr)) {
               JXL_ABORT("Failed to transform to lin. sRGB %s",
                         fnames[i].c_str());
             }
@@ -975,7 +1041,7 @@ class Benchmark {
             }
           }
         },
-        "Load images");
+        "Load images"));
     return loaded_images;
   }
 
@@ -1024,25 +1090,25 @@ class Benchmark {
     }
 
     std::vector<uint64_t> errors_thread;
-    RunOnPool(
+    JXL_CHECK(RunOnPool(
         pool, 0, tasks->size(),
-        [&](size_t num_threads) {
+        [&](const size_t num_threads) {
           // Reduce false sharing by only writing every 8th slot (64 bytes).
           errors_thread.resize(8 * num_threads);
           return true;
         },
-        [&](const int i, const int thread) {
+        [&](const uint32_t i, const size_t thread) {
           Task& t = (*tasks)[i];
           const CodecInOut& image = loaded_images[t.idx_image];
           t.image = &image;
-          PaddedBytes compressed;
+          std::vector<uint8_t> compressed;
           DoCompress(fnames[t.idx_image], image, extra_metrics_commands,
                      t.codec.get(), inner_pools[thread].get(), &compressed,
                      &t.stats);
           printer.TaskDone(i, t);
           errors_thread[8 * thread] += t.stats.total_errors;
         },
-        "Benchmark tasks");
+        "Benchmark tasks"));
     if (Args()->show_progress) fprintf(stderr, "\n");
     return std::accumulate(errors_thread.begin(), errors_thread.end(), 0);
   }

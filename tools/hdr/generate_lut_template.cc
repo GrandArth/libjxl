@@ -39,8 +39,8 @@ int main(int argc, const char** argv) {
 
   jxl::Image3F image(N * N, N);
   JXL_CHECK(jxl::RunOnPool(
-      &pool, 0, N, jxl::ThreadPool::SkipInit(),
-      [&](const int y, const int thread_id) {
+      &pool, 0, N, jxl::ThreadPool::NoInit,
+      [&](const uint32_t y, size_t /* thread */) {
         const float g = static_cast<float>(y) / (N - 1);
         float* const JXL_RESTRICT rows[3] = {
             image.PlaneRow(0, y), image.PlaneRow(1, y), image.PlaneRow(2, y)};
@@ -53,6 +53,7 @@ int main(int argc, const char** argv) {
       "GenerateTemplate"));
 
   jxl::CodecInOut output;
+  output.metadata.m.bit_depth.bits_per_sample = 16;
   output.SetFromImage(std::move(image), jxl::ColorEncoding::SRGB());
   JXL_CHECK(jxl::EncodeToFile(output, jxl::ColorEncoding::SRGB(), 16,
                               output_filename, &pool));

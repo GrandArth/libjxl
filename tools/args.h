@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "lib/extras/color_hints.h"
+#include "lib/extras/dec/color_hints.h"
 #include "lib/jxl/base/override.h"
 #include "lib/jxl/base/status.h"
 #include "lib/jxl/codec_in_out.h"  // DecoderHints
@@ -40,43 +40,6 @@ static inline bool ParseOverride(const char* arg, jxl::Override* out) {
   return JXL_FAILURE("Args");
 }
 
-static inline bool ParseUnsigned(const char* arg, size_t* out) {
-  char* end;
-  *out = static_cast<size_t>(strtoull(arg, &end, 0));
-  if (end[0] != '\0') {
-    fprintf(stderr, "Unable to interpret as unsigned integer: %s.\n", arg);
-    return JXL_FAILURE("Args");
-  }
-  return true;
-}
-
-static inline bool ParseUint32(const char* arg, uint32_t* out) {
-  size_t value = 0;
-  bool ret = ParseUnsigned(arg, &value);
-  if (ret) *out = value;
-  return ret;
-}
-
-static inline bool ParseSigned(const char* arg, int* out) {
-  char* end;
-  *out = static_cast<int>(strtol(arg, &end, 0));
-  if (end[0] != '\0') {
-    fprintf(stderr, "Unable to interpret as signed integer: %s.\n", arg);
-    return JXL_FAILURE("Args");
-  }
-  return true;
-}
-
-static inline bool ParseFloat(const char* arg, float* out) {
-  char* end;
-  *out = static_cast<float>(strtod(arg, &end));
-  if (end[0] != '\0') {
-    fprintf(stderr, "Unable to interpret as float: %s.\n", arg);
-    return JXL_FAILURE("Args");
-  }
-  return true;
-}
-
 static inline bool ParseFloatPair(const char* arg,
                                   std::pair<float, float>* out) {
   int parsed = sscanf(arg, "%f,%f", &out->first, &out->second);
@@ -91,18 +54,8 @@ static inline bool ParseFloatPair(const char* arg,
   return true;
 }
 
-static inline bool ParseDouble(const char* arg, double* out) {
-  char* end;
-  *out = static_cast<double>(strtod(arg, &end));
-  if (end[0] != '\0') {
-    fprintf(stderr, "Unable to interpret as double: %s.\n", arg);
-    return JXL_FAILURE("Args");
-  }
-  return true;
-}
-
 static inline bool ParseAndAppendKeyValue(const char* arg,
-                                          jxl::ColorHints* out) {
+                                          jxl::extras::ColorHints* out) {
   const char* eq = strchr(arg, '=');
   if (!eq) {
     fprintf(stderr, "Expected argument as 'key=value' but received '%s'\n",
@@ -121,34 +74,19 @@ static inline bool ParsePredictor(const char* arg, jxl::Predictor* out) {
     fprintf(stderr, "Invalid predictor: %s.\n", arg);
     return JXL_FAILURE("Args");
   }
-  if (p >= jxl::kNumModularPredictors) {
+  if (p >= jxl::kNumModularEncoderPredictors) {
     fprintf(stderr,
             "Invalid predictor value %" PRIu64 ", must be less than %" PRIu64
             ".\n",
-            p, static_cast<uint64_t>(jxl::kNumModularPredictors));
+            p, static_cast<uint64_t>(jxl::kNumModularEncoderPredictors));
     return JXL_FAILURE("Args");
   }
   *out = static_cast<jxl::Predictor>(p);
   return true;
 }
 
-static inline bool ParseString(const char* arg, std::string* out) {
-  out->assign(arg);
-  return true;
-}
-
 static inline bool ParseCString(const char* arg, const char** out) {
   *out = arg;
-  return true;
-}
-
-static inline bool SetBooleanTrue(bool* out) {
-  *out = true;
-  return true;
-}
-
-static inline bool SetBooleanFalse(bool* out) {
-  *out = false;
   return true;
 }
 

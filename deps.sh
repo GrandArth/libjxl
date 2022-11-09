@@ -13,17 +13,19 @@ MYDIR=$(dirname $(realpath "$0"))
 
 # Git revisions we use for the given submodules. Update these whenever you
 # update a git submodule.
-THIRD_PARTY_HIGHWAY="e69083a12a05caf037cabecdf1b248b7579705a5"
-THIRD_PARTY_LODEPNG="8c6a9e30576f07bf470ad6f09458a2dcd7a6a84a"
+THIRD_PARTY_BROTLI="35ef5c554d888bef217d449346067de05e269b30"
+THIRD_PARTY_HIGHWAY="22e3d7276f4157d4a47586ba9fd91dd6303f441a"
 THIRD_PARTY_SKCMS="64374756e03700d649f897dbd98c95e78c30c7da"
 THIRD_PARTY_SJPEG="868ab558fad70fcbe8863ba4e85179eeb81cc840"
+THIRD_PARTY_ZLIB="cacf7f1d4e3d44d871b605da3b647f07d718623f"
+THIRD_PARTY_LIBPNG="a40189cf881e9f0db80511c382292a5604c3c3d1"
 
 # Download the target revision from GitHub.
 download_github() {
   local path="$1"
   local project="$2"
 
-  local varname="${path^^}"
+  local varname=`echo "$path" | tr '[:lower:]' '[:upper:]'`
   varname="${varname/\//_}"
   local sha
   eval "sha=\${${varname}}"
@@ -64,16 +66,18 @@ Current directory is a git repository, downloading dependencies via git:
   git submodule update --init --recursive
 
 EOF
-    git -C "${MYDIR}" submodule update --init --recursive
+    git -C "${MYDIR}" submodule update --init --recursive --depth 1 --recommend-shallow
     return 0
   fi
 
   # Sources downloaded from a tarball.
+  download_github third_party/brotli google/brotli
   download_github third_party/highway google/highway
-  download_github third_party/lodepng lvandeve/lodepng
   download_github third_party/sjpeg webmproject/sjpeg
   download_github third_party/skcms \
     "https://skia.googlesource.com/skcms/+archive/"
+  download_github third_party/zlib madler/zlib
+  download_github third_party/libpng glennrp/libpng
   echo "Done."
 }
 

@@ -10,6 +10,7 @@
 #include "lib/extras/hlg.h"
 #include "lib/extras/tone_mapping.h"
 #include "lib/jxl/base/thread_pool_internal.h"
+#include "lib/jxl/enc_color_management.h"
 #include "tools/args.h"
 #include "tools/cmdline.h"
 
@@ -64,11 +65,13 @@ int main(int argc, const char** argv) {
   }
 
   jxl::CodecInOut image;
-  JXL_CHECK(jxl::SetFromFile(input_filename, jxl::ColorHints(), &image, &pool));
+  JXL_CHECK(jxl::SetFromFile(input_filename, jxl::extras::ColorHints(), &image,
+                             &pool));
   image.metadata.m.SetIntensityTarget(max_nits);
   JXL_CHECK(jxl::HlgInverseOOTF(
       &image.Main(), jxl::GetHlgGamma(max_nits, surround_nits), &pool));
   JXL_CHECK(jxl::GamutMap(&image, preserve_saturation, &pool));
+  image.metadata.m.SetIntensityTarget(301);
 
   jxl::ColorEncoding hlg;
   hlg.SetColorSpace(jxl::ColorSpace::kRGB);
@@ -76,7 +79,7 @@ int main(int argc, const char** argv) {
   hlg.white_point = jxl::WhitePoint::kD65;
   hlg.tf.SetTransferFunction(jxl::TransferFunction::kHLG);
   JXL_CHECK(hlg.CreateICC());
-  JXL_CHECK(image.TransformTo(hlg, &pool));
+  JXL_CHECK(image.TransformTo(hlg, jxl::GetJxlCms(), &pool));
   image.metadata.m.color_encoding = hlg;
   JXL_CHECK(jxl::EncodeToFile(image, output_filename, &pool));
 }

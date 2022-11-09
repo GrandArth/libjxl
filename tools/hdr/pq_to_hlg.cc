@@ -10,6 +10,7 @@
 #include "lib/extras/hlg.h"
 #include "lib/extras/tone_mapping.h"
 #include "lib/jxl/base/thread_pool_internal.h"
+#include "lib/jxl/enc_color_management.h"
 #include "tools/args.h"
 #include "tools/cmdline.h"
 
@@ -53,7 +54,7 @@ int main(int argc, const char** argv) {
   }
 
   jxl::CodecInOut image;
-  jxl::ColorHints color_hints;
+  jxl::extras::ColorHints color_hints;
   color_hints.Add("color_space", "RGB_D65_202_Rel_PeQ");
   JXL_CHECK(jxl::SetFromFile(input_filename, color_hints, &image, &pool));
   if (max_nits > 0) {
@@ -62,6 +63,10 @@ int main(int argc, const char** argv) {
   JXL_CHECK(jxl::ToneMapTo({0, 1000}, &image, &pool));
   JXL_CHECK(jxl::HlgInverseOOTF(&image.Main(), 1.2f, &pool));
   JXL_CHECK(jxl::GamutMap(&image, preserve_saturation, &pool));
+  // Peak luminance at which the system gamma is 1, since we are now in scene
+  // light, having applied the inverse OOTF ourselves to control the subsequent
+  // gamut mapping instead of leaving it to JxlCms below.
+  image.metadata.m.SetIntensityTarget(301);
 
   jxl::ColorEncoding hlg;
   hlg.SetColorSpace(jxl::ColorSpace::kRGB);
@@ -69,7 +74,7 @@ int main(int argc, const char** argv) {
   hlg.white_point = jxl::WhitePoint::kD65;
   hlg.tf.SetTransferFunction(jxl::TransferFunction::kHLG);
   JXL_CHECK(hlg.CreateICC());
-  JXL_CHECK(image.TransformTo(hlg, &pool));
+  JXL_CHECK(image.TransformTo(hlg, jxl::GetJxlCms(), &pool));
   image.metadata.m.color_encoding = hlg;
   JXL_CHECK(jxl::EncodeToFile(image, output_filename, &pool));
 }

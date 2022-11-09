@@ -197,11 +197,23 @@ class AvifCodec : public ImageCodec {
       decoder_ = AVIF_CODEC_CHOICE_DAV1D;
       return true;
     }
+    if (param.compare(0, 2, "a=") == 0) {
+      std::string subparam = param.substr(2);
+      size_t pos = subparam.find('=');
+      if (pos == std::string::npos) {
+        codec_specific_options_.emplace_back(subparam, "");
+      } else {
+        std::string key = subparam.substr(0, pos);
+        std::string value = subparam.substr(pos + 1);
+        codec_specific_options_.emplace_back(key, value);
+      }
+      return true;
+    }
     return ImageCodec::ParseParam(param);
   }
 
   Status Compress(const std::string& filename, const CodecInOut* io,
-                  ThreadPoolInternal* pool, PaddedBytes* compressed,
+                  ThreadPoolInternal* pool, std::vector<uint8_t>* compressed,
                   jpegxl::tools::SpeedStats* speed_stats) override {
     double elapsed_convert_image = 0;
     const double start = Now();
@@ -212,14 +224,16 @@ class AvifCodec : public ImageCodec {
           avifEncoderCreate(), &avifEncoderDestroy);
       encoder->codecChoice = encoder_;
       // TODO(sboukortt): configure this separately.
-      encoder->minQuantizer = encoder->maxQuantizer =
-          AVIF_QUANTIZER_BEST_QUALITY +
-          (AVIF_QUANTIZER_WORST_QUALITY - AVIF_QUANTIZER_BEST_QUALITY) *
-              (1 - 0.01 * q_target_);
+      encoder->minQuantizer = 0;
+      encoder->maxQuantizer = 63;
       encoder->tileColsLog2 = log2_cols;
       encoder->tileRowsLog2 = log2_rows;
       encoder->speed = speed_;
       encoder->maxThreads = pool->NumThreads();
+      for (const auto& opts : codec_specific_options_) {
+        avifEncoderSetCodecSpecificOption(encoder.get(), opts.first.c_str(),
+                                          opts.second.c_str());
+      }
       avifAddImageFlags add_image_flags = AVIF_ADD_IMAGE_FLAG_SINGLE;
       if (io->metadata.m.have_animation) {
         encoder->timescale = std::lround(
@@ -250,8 +264,7 @@ class AvifCodec : public ImageCodec {
             /*num_channels=*/ib.HasAlpha() ? 4 : 3, JXL_NATIVE_ENDIAN,
             /*stride=*/rgb_image.rowBytes, pool, rgb_image.pixels,
             rgb_image.rowBytes * rgb_image.height,
-            /*out_callback=*/nullptr, /*out_opaque=*/nullptr,
-            jxl::Orientation::kIdentity));
+            /*out_callback=*/{}, jxl::Orientation::kIdentity));
         const double end_convert_image = Now();
         elapsed_convert_image += end_convert_image - start_convert_image;
         JXL_RETURN_IF_AVIF_ERROR(avifImageRGBToYUV(image.get(), &rgb_image));
@@ -305,14 +318,17 @@ class AvifCodec : public ImageCodec {
         JXL_RETURN_IF_AVIF_ERROR(avifImageYUVToRGB(decoder->image, &rgb_image));
         const double start_convert_image = Now();
         {
+          JxlPixelFormat format = {
+              (has_alpha ? 4u : 3u),
+              (rgb_image.depth <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16),
+              JXL_NATIVE_ENDIAN, 0};
           ImageBundle ib(&io->metadata.m);
           JXL_RETURN_IF_ERROR(ConvertFromExternal(
               Span<const uint8_t>(rgb_image.pixels,
                                   rgb_image.height * rgb_image.rowBytes),
-              rgb_image.width, rgb_image.height, color, has_alpha,
-              /*alpha_is_premultiplied=*/false, rgb_image.depth,
-              JXL_NATIVE_ENDIAN, /*flipped_y=*/false, pool, &ib,
-              /*float_in=*/false));
+              rgb_image.width, rgb_image.height, color,
+              /*alpha_is_premultiplied=*/false, rgb_image.depth, format, pool,
+              &ib));
           io->frames.push_back(std::move(ib));
           io->dec_pixels += rgb_image.width * rgb_image.height;
         }
@@ -335,6 +351,7 @@ class AvifCodec : public ImageCodec {
   int speed_ = AVIF_SPEED_DEFAULT;
   int log2_cols = 0;
   int log2_rows = 0;
+  std::vector<std::pair<std::string, std::string>> codec_specific_options_;
 };
 
 ImageCodec* CreateNewAvifCodec(const BenchmarkArgs& args) {

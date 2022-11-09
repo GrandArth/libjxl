@@ -13,13 +13,16 @@
 #include <vector>
 
 #include "lib/extras/codec.h"
-#include "lib/extras/color_description.h"
+#include "lib/extras/dec/color_description.h"
 #include "lib/jxl/base/status.h"
 #include "lib/jxl/color_encoding_internal.h"
 #include "lib/jxl/color_management.h"
+#include "tools/benchmark/benchmark_codec_custom.h"  // for AddCommand..
 #include "tools/benchmark/benchmark_codec_jpeg.h"  // for AddCommand..
 #include "tools/benchmark/benchmark_codec_jxl.h"
+#if JPEGXL_ENABLE_APNG
 #include "tools/benchmark/benchmark_codec_png.h"
+#endif
 
 #ifdef BENCHMARK_WEBP
 #include "tools/benchmark/benchmark_codec_webp.h"
@@ -126,6 +129,7 @@ Status BenchmarkArgs::AddCommandLineOptions() {
   AddDouble(&mul_output, "mul_output",
             "If nonzero, multiplies linear sRGB by this and clamps to 255",
             0.0);
+  AddFlag(&save_heatmap, "save_heatmap", "Saves the heatmap images.", true);
   AddDouble(&heatmap_good, "heatmap_good",
             "If greater than zero, use this as the good "
             "threshold for creating heatmap images.",
@@ -141,6 +145,11 @@ Status BenchmarkArgs::AddCommandLineOptions() {
           "Base64-encode the images in the HTML report rather than use "
           "external file names. May cause very large HTML data size.",
           false);
+  AddFlag(&html_report_use_decompressed, "html_report_use_decompressed",
+          "Show the compressed image as decompressed to --output_extension.",
+          true);
+  AddFlag(&html_report_add_heatmap, "html_report_add_heatmap",
+          "Add heatmaps to the image comparisons.", false);
 
   AddFlag(
       &markdown, "markdown",
@@ -208,11 +217,14 @@ Status BenchmarkArgs::AddCommandLineOptions() {
       "Distance numbers and compression speeds shown in the table are invalid.",
       false);
 
+  if (!AddCommandLineOptionsCustomCodec(this)) return false;
   if (!AddCommandLineOptionsJxlCodec(this)) return false;
 #ifdef BENCHMARK_JPEG
   if (!AddCommandLineOptionsJPEGCodec(this)) return false;
 #endif  // BENCHMARK_JPEG
+#if JPEGXL_ENABLE_APNG
   if (!AddCommandLineOptionsPNGCodec(this)) return false;
+#endif
 #ifdef BENCHMARK_WEBP
   if (!AddCommandLineOptionsWebPCodec(this)) return false;
 #endif  // BENCHMARK_WEBP
@@ -229,8 +241,8 @@ Status BenchmarkArgs::ValidateArgs() {
     fprintf(stderr, "Missing --input filename(s).\n");
     return false;
   }
-  if (CodecFromExtension(output_extension, &bits_per_sample) ==
-      Codec::kUnknown) {
+  if (extras::CodecFromExtension(output_extension, &bits_per_sample) ==
+      extras::Codec::kUnknown) {
     JXL_WARNING("Unrecognized output_extension %s, try .png",
                 output_extension.c_str());
     return false;  // already warned
